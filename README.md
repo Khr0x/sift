@@ -28,21 +28,42 @@ In modern architectures powered by microservices, distributed observability, and
 
 ## 🛠 Key Features
 
-### 🔍 Deep-Object Sifting
+### 🔍 Intelligent Pattern Detection
 
-High-performance recursive traversal engine that identifies sensitive keys inside deeply nested and complex JSON structures.
+Advanced regex-based detection system that automatically identifies sensitive data in string values:
 
-* Optimized DFS traversal
-* Supports objects, arrays, and hybrid structures
-* Dynamic sensitive key configuration
+* **Credit cards** with Luhn algorithm validation
+* **Email addresses** 
+* **US Social Security Numbers (SSN)**
+* **JWT tokens** (eyJ... signature pattern)
+* **API keys** (32+ alphanumeric strings with validation)
+* Custom patterns with optional validation functions
 
-### 🛡️ Hardened Security
+### 🛡️ Dual-Layer Protection
 
-Implements **Zero-Trust Logging** policies, ensuring no data leaves the process unsanitized.
+Two complementary redaction strategies working in tandem:
 
-* Automatic redaction of critical fields
-* Configurable partial masking
-* Environment-based policies (dev, staging, prod)
+1. **Key-based redaction**: Masks values of known sensitive field names (password, token, cvv, etc.)
+2. **Pattern-based redaction**: Scans string values for sensitive patterns like credit cards, emails, SSNs
+
+### ⚙️ Flexible Configuration
+
+Highly customizable redaction behavior:
+
+* Custom sensitive keys beyond defaults
+* Custom regex patterns with validation
+* Masking styles: `full` (complete replacement) or `partial` (show last 4 chars)
+* Configurable redaction text (`[REDACTED]`, `***`, or any custom string)
+* Key exclusion list for technical identifiers
+
+### 🔗 Distributed Tracing Support
+
+Built-in middleware for request tracing:
+
+* Automatic trace ID generation or extraction from headers
+* AsyncLocalStorage-based context propagation
+* Compatible with Express and NestJS
+* OpenTelemetry-ready structure
 
 ### ⚡ Stream Processing
 
@@ -52,24 +73,12 @@ Optimized to process high log throughput in real-time with negligible CPU overhe
 * High-performance pipeline compatibility
 * Designed for containers and serverless environments
 
-### 📋 Advanced Pattern Matching
+### 🔌 Multiple Transports
 
-Supports advanced RegEx and dynamic whitelist/blacklist strategies to detect patterns such as:
+Extensible transport system for flexible log delivery:
 
-* Credit card numbers
-* SSNs
-* JWT tokens
-* API keys
-* Email addresses
-
-### 🔌 Agnostic Integration
-
-Works as an independent middleware and integrates seamlessly with:
-
-* Winston
-* Pino
-
-Or can be used as a standalone logger in any Node.js application.
+* **ConsoleTransport**: Formatted console output with colors (dev) or JSON (prod)
+* Easy to extend with custom transports (file, HTTP, APM integrations)
 
 ---
 
@@ -81,11 +90,166 @@ npm install @khr0x/sift
 
 ---
 
-## 🧩 Basic Usage (TypeScript)
+## 🧩 Usage Examples
+
+### Basic Logger Usage
 
 ```ts
+import { SiftLogger } from 'sift';
 
+const logger = new SiftLogger({
+  env: 'production',
+  redactKeys: ['credit_card', 'phone']
+});
+
+logger.info('User payment processed', {
+  user_id: '12345',
+  credit_card: '4532-1234-5678-9012',  // Will be [REDACTED]
+  amount: 150.00,
+  email: 'user@example.com'             // Auto-detected and [REDACTED]
+});
 ```
+
+### Advanced Redactor Configuration
+
+```ts
+import { SiftLogger } from 'sift';
+
+const logger = new SiftLogger({
+  env: 'production',
+  redactKeys: ['internal_id'],
+  maskStyle: 'partial',                 // Show last 4 characters
+  redactedText: '***HIDDEN***',         // Custom redaction text
+  customPatterns: [{
+    name: 'ip_address',
+    pattern: /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g
+  }]
+});
+
+logger.info('Request received', {
+  card: '4532-1234-5678-9012',          // Output: ************9012
+  ip: '192.168.1.1'                     // Output: ***HIDDEN***
+});
+```
+
+### Distributed Tracing with Express
+
+```ts
+import express from 'express';
+import { siftTraceMiddleware, SiftLogger } from 'sift';
+
+const app = express();
+const logger = new SiftLogger({ env: 'production' });
+
+// Add tracing middleware
+app.use(siftTraceMiddleware({
+  headerName: 'x-trace-id',
+  getId: () => `trace-${Date.now()}`
+}));
+
+app.get('/api/users', (req, res) => {
+  logger.info('Fetching users', { count: 100 });
+  // trace_id automatically included in logs
+  res.json({ users: [] });
+});
+
+app.listen(3000);
+```
+
+### NestJS Integration
+
+```ts
+import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
+import { NestSiftTraceMiddleware } from 'sift';
+
+@Module({})
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(NestSiftTraceMiddleware)
+      .forRoutes('*');
+  }
+}
+```
+
+### Standalone Redacter
+
+```ts
+import { createRedacter } from 'sift';
+
+const redacter = createRedacter({
+  customKeys: ['secret_key'],
+  maskStyle: 'partial',
+  excludeKeys: ['trace_id', 'request_id']  // Never redact these
+});
+
+const data = {
+  trace_id: 'abc-123',                    // Not redacted (excluded)
+  secret_key: 'sk_live_1234567890',       // Output: ***************7890
+  email: 'user@example.com'               // Output: [REDACTED]
+};
+
+const sanitized = JSON.parse(JSON.stringify(data, redacter));
+console.log(sanitized);
+```
+
+### Custom Transport
+
+```ts
+import { SiftLogger, BaseTransport } from 'sift';
+
+class HttpTransport extends BaseTransport {
+  write(record: any, serialized: string) {
+    fetch('https://logs.example.com/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: serialized
+    });
+  }
+}
+
+const logger = new SiftLogger({
+  env: 'production',
+  transports: [new HttpTransport()]
+});
+
+logger.info('Log sent to remote server');
+```
+
+---
+
+## 📚 API Reference
+
+### SiftLogger Options
+
+```ts
+interface SiftOptions {
+  env?: 'development' | 'production';   // Default: process.env.NODE_ENV
+  redactKeys?: string[];                // Additional keys to redact
+  maskStyle?: 'full' | 'partial';       // Default: 'full'
+  redactedText?: string;                // Default: '[REDACTED]'
+  customPatterns?: Array<{
+    name: string;
+    pattern: RegExp;
+    validate?: (match: string) => boolean;
+  }>;
+  transports?: BaseTransport[];         // Default: [ConsoleTransport]
+}
+```
+
+### Default Sensitive Keys
+
+The following keys are redacted by default (case-insensitive):
+
+`password`, `token`, `secret`, `cvv`, `card_number`, `authorization`, `api_key`, `apikey`, `access_token`, `refresh_token`, `private_key`, `ssn`, `social_security`, `tax_id`, `credit_card`
+
+### Default Pattern Detection
+
+- **Credit Cards**: 13-19 digits with optional spaces/dashes, validated with Luhn algorithm
+- **Emails**: Standard email format validation
+- **SSN**: Format `XXX-XX-XXXX`
+- **JWT**: Tokens starting with `eyJ...`
+- **API Keys**: 32+ alphanumeric characters (validated for letter+number mix)
 
 ---
 
@@ -94,9 +258,11 @@ npm install @khr0x/sift
 ```
 Application Layer
         ↓
-      SIFT
+    Middleware (Tracing)
         ↓
- Transport (Console / File / HTTP / APM)
+   SIFT Logger (Redaction)
+        ↓
+ Transports (Console / File / HTTP / APM)
 ```
 
 SIFT acts as a **mandatory intermediate layer** between your application and any logging transport.
@@ -125,10 +291,18 @@ SIFT follows these principles:
 
 ## 🛣 Roadmap
 
+* [x] Distributed tracing support with AsyncLocalStorage
+* [x] Pattern-based detection with Luhn validation
+* [x] NestJS middleware support
+* [x] Express middleware support
+* [x] Configurable masking styles (full/partial)
+* [x] Custom patterns with validation
 * [ ] Official Winston plugin
 * [ ] Official Pino plugin
+* [ ] File transport
+* [ ] HTTP transport
+* [ ] OpenTelemetry exporter
 * [ ] WASM mode for edge runtimes
-* [ ] Distributed tracing support (OpenTelemetry)
 * [ ] Offline inspection CLI
 
 ---
@@ -141,7 +315,7 @@ Contributions are welcome. Open an issue or submit a Pull Request following the 
 
 ## 📄 License
 
-MIT License
+ISC License
 
 ---
 
