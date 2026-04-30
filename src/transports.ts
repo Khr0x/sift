@@ -5,12 +5,21 @@ export interface LogEntry {
   severity_text: string;
   trace_id?: string;
   span_id?: string;
+  parent_span_id?: string;
+  request_id?: string;
+  trace_flags?: string;
   message: string;
   attributes?: Record<string, any>;
 }
 
 export interface Transport {
   write(entry: LogEntry, serialized: string, env: string): void | Promise<void>;
+}
+
+export interface WebhookTransportOptions {
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+  fetch?: typeof fetch;
 }
 
 export class ConsoleTransport implements Transport {
@@ -39,15 +48,29 @@ export class ConsoleTransport implements Transport {
 }
 
 export class WebhookTransport implements Transport {
-  constructor(private url: string) {}
+  private readonly headers: Record<string, string>;
+  private readonly timeoutMs: number;
+  private readonly fetchFn: typeof fetch;
 
-  write(entry: LogEntry, serialized: string, env: string): void {
-    fetch(this.url, {
+  constructor(private readonly url: string, options: WebhookTransportOptions = {}) {
+    this.headers = {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    };
+    this.timeoutMs = options.timeoutMs ?? 5000;
+    this.fetchFn = options.fetch || fetch;
+  }
+
+  async write(entry: LogEntry, serialized: string, env: string): Promise<void> {
+    const response = await this.fetchFn(this.url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: serialized
-    }).catch(err => {
-      console.error('Failed to send log to webhook', err);
+      headers: this.headers,
+      body: serialized,
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
+
+    if (!response.ok) {
+      throw new Error(`Webhook transport failed with status ${response.status}`);
+    }
   }
 }

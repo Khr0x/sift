@@ -160,7 +160,8 @@ app.listen(3000);
 
 ```ts
 import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
-import { NestSiftTraceMiddleware } from 'sift';
+import { NestFactory } from '@nestjs/core';
+import { NestSiftTraceMiddleware, SiftNestLogger, WebhookTransport } from 'sift';
 
 @Module({})
 export class AppModule implements NestModule {
@@ -170,7 +171,95 @@ export class AppModule implements NestModule {
       .forRoutes('*');
   }
 }
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule, {
+    logger: new SiftNestLogger({
+      env: 'production',
+      transports: [
+        new WebhookTransport('https://logs.example.com/ingest', {
+          headers: { Authorization: `Bearer ${process.env.LOG_TOKEN}` },
+          timeoutMs: 3000
+        })
+      ]
+    })
+  });
+
+  await app.listen(3000);
+}
 ```
+
+### NestJS Database Transport
+
+```ts
+import { Injectable, MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import {
+  LogEntry,
+  NestSiftTraceMiddleware,
+  SiftNestLogger,
+  Transport
+} from 'sift';
+
+@Injectable()
+class LogsService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  create(entry: LogEntry, raw: Record<string, any>) {
+    return this.prisma.log.create({
+      data: {
+        timestamp: new Date(entry.timestamp),
+        level: entry.severity_text,
+        message: entry.message,
+        traceId: entry.trace_id,
+        spanId: entry.span_id,
+        parentSpanId: entry.parent_span_id,
+        requestId: entry.request_id,
+        attributes: entry.attributes ?? {},
+        raw
+      }
+    });
+  }
+}
+
+class DatabaseLogTransport implements Transport {
+  constructor(private readonly logsService: LogsService) {}
+
+  async write(entry: LogEntry, serialized: string) {
+    await this.logsService.create(entry, JSON.parse(serialized));
+  }
+}
+
+@Module({
+  providers: [LogsService]
+})
+class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(NestSiftTraceMiddleware)
+      .forRoutes('*');
+  }
+}
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule, {
+    bufferLogs: true
+  });
+  const logsService = app.get(LogsService);
+
+  app.useLogger(new SiftNestLogger({
+    env: 'production',
+    transports: [
+      new DatabaseLogTransport(logsService)
+    ]
+  }));
+
+  await app.listen(3000);
+}
+```
+
+When `NestSiftTraceMiddleware` is active, database log rows receive `trace_id`,
+`span_id`, `parent_span_id`, and `request_id` automatically.
 
 ### Standalone Redacter
 
@@ -196,15 +285,19 @@ console.log(sanitized);
 ### Custom Transport
 
 ```ts
-import { SiftLogger, BaseTransport } from 'sift';
+import { SiftLogger, type LogEntry, type Transport } from 'sift';
 
-class HttpTransport extends BaseTransport {
-  write(record: any, serialized: string) {
-    fetch('https://logs.example.com/ingest', {
+class HttpTransport implements Transport {
+  async write(entry: LogEntry, serialized: string) {
+    const response = await fetch('https://logs.example.com/ingest', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: serialized
     });
+
+    if (!response.ok) {
+      throw new Error(`Log ingest failed with status ${response.status}`);
+    }
   }
 }
 
@@ -226,6 +319,7 @@ logger.info('Log sent to remote server');
 interface SiftOptions {
   env?: 'development' | 'production';   // Default: process.env.NODE_ENV
   redactKeys?: string[];                // Additional keys to redact
+  excludeKeys?: string[];               // Keys that should never be redacted
   maskStyle?: 'full' | 'partial';       // Default: 'full'
   redactedText?: string;                // Default: '[REDACTED]'
   customPatterns?: Array<{
@@ -233,7 +327,7 @@ interface SiftOptions {
     pattern: RegExp;
     validate?: (match: string) => boolean;
   }>;
-  transports?: BaseTransport[];         // Default: [ConsoleTransport]
+  transports?: Transport[];             // Default: [ConsoleTransport]
 }
 ```
 

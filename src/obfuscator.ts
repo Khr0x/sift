@@ -61,6 +61,12 @@ export interface RedacterOptions {
    * customKeys: ['user_id', 'session_token']
    */
   customKeys?: string[];
+
+  /**
+   * Object keys that should never be redacted.
+   * Keys are matched case-insensitively.
+   */
+  excludeKeys?: string[];
   
   /**
    * Custom regex patterns to detect and redact sensitive data in string values.
@@ -158,6 +164,7 @@ export function createRedacter(options: RedacterOptions | string[] = {}) {
   
   const { 
     customKeys = [], 
+    excludeKeys = [],
     customPatterns = [], 
     maskStyle = 'full',
     redactedText = '[REDACTED]'
@@ -167,6 +174,7 @@ export function createRedacter(options: RedacterOptions | string[] = {}) {
     ...defaultSensitiveKeys,
     ...customKeys.map(k => k.toLowerCase())
   ]);
+  const keysToExclude = new Set(excludeKeys.map(k => k.toLowerCase()));
   
   const allPatterns = [...sensitivePatterns, ...customPatterns];
 
@@ -193,6 +201,10 @@ export function createRedacter(options: RedacterOptions | string[] = {}) {
   }
 
   return function replacer(key: string, value: any) {
+    if (keysToExclude.has(key.toLowerCase())) {
+      return value;
+    }
+
     if (keysToMask.has(key.toLowerCase())) {
       if (typeof value === 'string') {
         return maskValue(value, 'key');

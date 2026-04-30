@@ -70,4 +70,19 @@ describe('SIFT Logger - Obfuscator', () => {
     expect(result.employees[1].credentials.cvv).toBe('[REDACTED]');
     expect(result.employees[0].name).toBe('Alice');
   });
+
+  it('Should preserve excluded technical keys', () => {
+    const redacter = createRedacter({
+      excludeKeys: ['trace_id']
+    });
+    const data = {
+      trace_id: '4bf92f3577b34da6a3ce929d0e0e4736',
+      token: 'secret-token'
+    };
+
+    const result = JSON.parse(JSON.stringify(data, redacter));
+
+    expect(result.trace_id).toBe('4bf92f3577b34da6a3ce929d0e0e4736');
+    expect(result.token).toBe('[REDACTED]');
+  });
 });

@@ -1,95 +1,123 @@
-import { randomUUID } from 'crypto';
+import { createHttpTraceContext, setHttpTraceHeaders, type HttpTraceOptions } from './http-tracing';
+import { SiftLogger, type SiftOptions } from './logger';
 import { traceStorage } from './context';
 
-/**
- * NestJS middleware for distributed tracing support.
- * 
- * This middleware extracts or generates a trace ID for each incoming request and stores it
- * in AsyncLocalStorage context, making it available throughout the request lifecycle.
- * The trace ID is also added to the response headers.
- * 
- * @example
- * // Basic usage in NestJS app
- * import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
- * import { SiftTraceMiddleware } from 'sift';
- * 
- * @Module({})
- * export class AppModule implements NestModule {
- *   configure(consumer: MiddlewareConsumer) {
- *     consumer
- *       .apply(SiftTraceMiddleware)
- *       .forRoutes('*');
- *   }
- * }
- * 
- * @example
- * // With custom options
- * export class AppModule implements NestModule {
- *   configure(consumer: MiddlewareConsumer) {
- *     consumer
- *       .apply(new SiftTraceMiddleware({
- *         headerName: 'x-request-id',
- *         getId: () => `trace-${Date.now()}`
- *       }).use.bind(new SiftTraceMiddleware()))
- *       .forRoutes('*');
- *   }
- * }
- */
+export interface SiftTraceMiddlewareOptions extends HttpTraceOptions {}
+
+export interface NestLoggerLike {
+  log(message: any, ...optionalParams: any[]): any;
+  error(message: any, ...optionalParams: any[]): any;
+  warn(message: any, ...optionalParams: any[]): any;
+  debug?(message: any, ...optionalParams: any[]): any;
+  verbose?(message: any, ...optionalParams: any[]): any;
+  fatal?(message: any, ...optionalParams: any[]): any;
+  setLogLevels?(levels: string[]): any;
+}
+
+export interface SiftNestLoggerOptions extends SiftOptions {
+  logger?: SiftLogger;
+  context?: string;
+}
+
 export class SiftTraceMiddleware {
-  /** Name of the HTTP header to read/write the trace ID (normalized to lowercase) */
-  private headerName: string;
-  
-  /** Function to generate a new trace ID when one is not provided */
-  private getId: () => string;
+  constructor(private readonly options: SiftTraceMiddlewareOptions = {}) {}
 
-  /**
-   * Creates a new SiftTraceMiddleware instance.
-   * 
-   * @param options - Configuration options for the middleware
-   * @param options.headerName - HTTP header name for the trace ID (default: 'x-trace-id')
-   * @param options.getId - Function to generate new trace IDs (default: randomUUID from crypto)
-   * 
-   * @example
-   * new SiftTraceMiddleware(); // Uses defaults
-   * 
-   * @example
-   * new SiftTraceMiddleware({
-   *   headerName: 'x-correlation-id',
-   *   getId: () => `${Date.now()}-${Math.random()}`
-   * });
-   */
-  constructor(options: { headerName?: string; getId?: () => string } = {}) {
-    this.headerName = (options.headerName || 'x-trace-id').toLowerCase();
-    this.getId = options.getId || (() => randomUUID());
-  }
-
-  /**
-   * Middleware handler function for NestJS/Express.
-   * 
-   * Extracts the trace ID from request headers or generates a new one if not present.
-   * Stores the trace ID in AsyncLocalStorage context and adds it to response headers.
-   * 
-   * @param req - Express/NestJS request object
-   * @param res - Express/NestJS response object
-   * @param next - Express next function to continue the middleware chain
-   * 
-   * @remarks
-   * - If the trace ID header contains multiple values (array), only the first one is used
-   * - The trace ID is available via `getTraceId()` throughout the request lifecycle
-   * - The trace ID is automatically added to the response headers
-   */
   use(req: any, res: any, next: (error?: any) => void) {
-    let traceId = req.headers[this.headerName];
+    const traceContext = createHttpTraceContext(req.headers, this.options);
 
-    if (!traceId) {
-      traceId = this.getId();
-    } else if (Array.isArray(traceId)) {
-      traceId = traceId[0];
-    }
-
-    traceStorage.run({ trace_id: traceId }, () => {
-      res.setHeader(this.headerName, traceId);
+    req.siftTrace = traceContext;
+    setHttpTraceHeaders(res, traceContext, this.options);
+    traceStorage.run(traceContext, () => {
       next();
     });
+  }
+}
+
+export class SiftNestLogger implements NestLoggerLike {
+  private readonly logger: SiftLogger;
+  private readonly defaultContext?: string;
+  private levels?: Set<string>;
+
+  constructor(options: SiftNestLoggerOptions | SiftLogger = {}) {
+    if (options instanceof SiftLogger) {
+      this.logger = options;
+      return;
+    }
+
+    this.logger = options.logger || new SiftLogger(options);
+    this.defaultContext = options.context;
+  }
+
+  log(message: any, ...optionalParams: any[]) {
+    if (!this.isLevelEnabled('log')) return;
+    this.logger.info(message, this.createAttributes(optionalParams));
+  }
+
+  error(message: any, ...optionalParams: any[]) {
+    if (!this.isLevelEnabled('error')) return;
+    this.logger.error(message, this.createErrorAttributes(optionalParams));
+  }
+
+  warn(message: any, ...optionalParams: any[]) {
+    if (!this.isLevelEnabled('warn')) return;
+    this.logger.warn(message, this.createAttributes(optionalParams));
+  }
+
+  debug(message: any, ...optionalParams: any[]) {
+    if (!this.isLevelEnabled('debug')) return;
+    this.logger.debug(message, this.createAttributes(optionalParams));
+  }
+
+  verbose(message: any, ...optionalParams: any[]) {
+    if (!this.isLevelEnabled('verbose')) return;
+    this.logger.verbose(message, this.createAttributes(optionalParams));
+  }
+
+  fatal(message: any, ...optionalParams: any[]) {
+    if (!this.isLevelEnabled('fatal')) return;
+    this.logger.error(message, {
+      ...this.createErrorAttributes(optionalParams),
+      fatal: true,
+    });
+  }
+
+  setLogLevels(levels: string[]) {
+    this.levels = new Set(levels);
+  }
+
+  private isLevelEnabled(level: string): boolean {
+    return !this.levels || this.levels.has(level);
+  }
+
+  private createAttributes(optionalParams: any[]) {
+    const context = this.extractContext(optionalParams);
+    const extra = optionalParams.filter(value => value !== context);
+
+    return {
+      ...(context ? { context } : {}),
+      ...(extra.length > 0 ? { extra } : {}),
+    };
+  }
+
+  private createErrorAttributes(optionalParams: any[]) {
+    const context = this.extractContext(optionalParams);
+    const [traceOrStack, ...rest] = optionalParams.filter(value => value !== context);
+
+    return {
+      ...(context ? { context } : {}),
+      ...(typeof traceOrStack === 'string' ? { stack: traceOrStack } : {}),
+      ...(traceOrStack && typeof traceOrStack !== 'string' ? { error: traceOrStack } : {}),
+      ...(rest.length > 0 ? { extra: rest } : {}),
+    };
+  }
+
+  private extractContext(optionalParams: any[]): string | undefined {
+    const last = optionalParams[optionalParams.length - 1];
+
+    if (typeof last === 'string') {
+      return last;
+    }
+
+    return this.defaultContext;
   }
 }

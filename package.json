@@ -58,15 +58,16 @@
   },
   "homepage": "https://github.com/Khr0x/sift#readme",
   "devDependencies": {
-    "@types/node": "^25.3.3",
+    "@types/node": "^25.6.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "colorette": "^2.0.20"
+    "colorette": "^2.0.20",
+    "crypto": "^1.0.1"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=24.0.0"
   }
 }

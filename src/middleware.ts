@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHttpTraceContext, setHttpTraceHeaders, type HttpTraceOptions } from './http-tracing';
 import { traceStorage } from './context';
 
 /**
@@ -6,7 +6,7 @@ import { traceStorage } from './context';
  * Esto permite que el trace ID esté disponible en cualquier parte del código que ejecute
  * dentro de la misma solicitud, facilitando la correlación de logs y trazas.
  */
-export interface SiftTraceMiddlewareOptions {
+export interface SiftTraceMiddlewareOptions extends HttpTraceOptions {
   /** Nombre del header para extraer/inyectar el trace ID. Default: 'x-trace-id' */
   headerName?: string;
   /** Función opcional para generar IDs personalizados si no viene en el header */
@@ -14,20 +14,12 @@ export interface SiftTraceMiddlewareOptions {
 }
 
 export function siftTraceMiddleware(options: SiftTraceMiddlewareOptions = {}) {
-  const headerName = (options.headerName || 'x-trace-id').toLowerCase();
-  const getId = options.getId || (() => randomUUID());
-
   return (req: any, res: any, next: any) => {
-    let traceId = req.headers[headerName];
+    const traceContext = createHttpTraceContext(req.headers, options);
 
-    if (!traceId) {
-      traceId = getId();
-    } else if (Array.isArray(traceId)) {
-      traceId = traceId[0];
-    }
-
-    traceStorage.run({ trace_id: traceId }, () => {
-      res.setHeader(headerName, traceId);
+    req.siftTrace = traceContext;
+    setHttpTraceHeaders(res, traceContext, options);
+    traceStorage.run(traceContext, () => {
       next();
     });
   };
